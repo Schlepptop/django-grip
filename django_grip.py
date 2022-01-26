@@ -13,16 +13,6 @@ from gripcontrol import Channel, GripPubControl, WebSocketEvent, \
 	create_grip_channel_header, decode_websocket_events, \
 	encode_websocket_events
 
-if django.VERSION[0] > 1 or (django.VERSION[0] == 1 and
-		django.VERSION[1] >= 10):
-	from django.utils.deprecation import MiddlewareMixin
-	middleware_parent = MiddlewareMixin
-else:
-	middleware_parent = object
-
-# The PubControl instance and lock used for synchronization.
-_pubcontrol = None
-_lock = threading.Lock()
 
 def _is_basestring_instance(instance):
 	try:
@@ -201,8 +191,11 @@ def websocket_only(view_func):
 	wrapped_view.websocket_only = True
 	return wraps(view_func, assigned=WRAPPER_ASSIGNMENTS)(wrapped_view)
 
-class GripMiddleware(middleware_parent):
-	def process_request(self, request):
+class GripMiddleware():
+	def __init__(self, get_response):
+		self.get_response = get_response
+
+	def __call__(self, request):
 		# make sure these fields are always set
 		request.grip = GripData()
 		request.wscontext = None
@@ -289,7 +282,7 @@ class GripMiddleware(middleware_parent):
 						'Error parsing WebSocket events.\n')
 
 			wscontext = WebSocketContext(cid, meta, events,
-					grip_prefix=_get_prefix())
+										 grip_prefix=_get_prefix())
 
 		request.grip.proxied = proxied
 		request.grip.signed = signed
@@ -299,13 +292,8 @@ class GripMiddleware(middleware_parent):
 		request.grip_proxied = proxied
 		request.grip_signed = signed
 
-	def process_view(self, request, view_func, view_args, view_kwargs):
-		if (getattr(view_func, 'websocket_only', False) and
-				not request.wscontext):
-			return HttpResponseBadRequest(
-					'Request must contain WebSocket events.\n')
+		response = self.get_response(request)
 
-	def process_response(self, request, response):
 		# if this was a successful websocket-events request, then hijack the
 		#   response
 		if (getattr(request, 'wscontext', None) and
@@ -342,10 +330,10 @@ class GripMiddleware(middleware_parent):
 			events.extend(wscontext.out_events)
 			if wscontext.closed:
 				events.append(WebSocketEvent('CLOSE',
-						pack('>H', wscontext.out_close_code)))
+											 pack('>H', wscontext.out_close_code)))
 
 			response = HttpResponse(encode_websocket_events(events),
-					content_type='application/websocket-events')
+									content_type='application/websocket-events')
 			if wscontext.accepted:
 				response['Sec-WebSocket-Extensions'] = 'grip'
 			for k in meta_remove:
@@ -401,3 +389,11 @@ class GripMiddleware(middleware_parent):
 					response['Grip-Link'] = hvalue
 
 		return response
+
+
+	def process_view(self, request, view_func, view_args, view_kwargs):
+		if (getattr(view_func, 'websocket_only', False) and
+				not request.wscontext):
+			return HttpResponseBadRequest(
+					'Request must contain WebSocket events.\n')
+
